@@ -1,0 +1,9 @@
+Use any many instances of the "Growl for Crestron" module as necessary for
+each notification type.
+
+Module options include:
+- Notification Name
+- Priority
+- Sticky
+
+An simple example program is included.
