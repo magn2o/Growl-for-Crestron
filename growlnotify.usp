@@ -1,0 +1,285 @@
+/*
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ *     * Redistributions of source code must retain the above copyright
+ *       notice, this list of conditions and the following disclaimer.
+ *     * Redistributions in binary form must reproduce the above copyright
+ *       notice, this list of conditions and the following disclaimer in the
+ *       documentation and/or other materials provided with the distribution.
+ *     * Neither the name of "Growl for Crestron" nor the
+ *       names of its contributors may be used to endorse or promote products
+ *       derived from this software without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+ * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR 
+ * ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+ * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+ * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
+ * ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+ * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+*/
+
+#enable_dynamic
+#symbol_name "Growl for Crestron Packet Generator"
+#category "46" "Growl" // Custom
+
+#default_nonvolatile
+#enable_stack_checking
+
+#define_constant APPLICATION_NAME			"Crestron Notifier"
+
+#define_constant GROWL_UDP_PORT				9887
+#define_constant GROWL_PROTOCOL_VERSION		1
+#define_constant GROWL_TYPE_REGISTRATION	4
+#define_constant GROWL_TYPE_NOTIFICATION	5
+
+analog_input _skip_;
+analog_input nPriority_Analog;
+analog_input bSticky_Analog;
+
+string_input _skip_;
+string_input szNotification_Text[128];
+string_input szTitle_Text[128];
+string_input szDescription_Text[128];
+
+udp_socket sock[1024];
+
+string_parameter ipAddress[15];
+
+#begin_parameter_properties ipAddress
+	propValidUnits = unitString;
+#end_parameter_properties
+
+structure notificationStruct
+{
+	string text[128];
+	integer bool;
+};
+
+notificationStruct m_aNotification[10];
+
+integer index;
+integer sockOnline;
+
+string m_szApplication$[128];
+
+string_function utf8_encode(string input)
+{
+	integer i; 
+	integer c;
+
+	string utfText[256];
+	
+	utfText = "";
+	
+	for(i = 1 to len(input))
+	{
+		c = byte(input, i);
+		
+		if(c < 128) utfText = utfText + chr(c);
+		else if((c > 127) && (c < 2048))
+		{
+			utfText = utfText + chr((c >> 6) | 192);
+			utfText = utfText + chr((c & 63) | 128);
+		}
+		else
+		{
+			utfText = utfText + chr((c >> 12) | 224);
+			utfText = utfText + chr(((c >> 6) & 63) | 128);
+			utfText = utfText + chr((c & 63) | 128);
+		}
+	}
+	
+	return(utfText);
+} // utf8_encode
+
+function GrowlRegistrationPacket(string szApplication)
+{
+	index = 0;
+
+	m_szApplication$ = utf8_encode(szApplication);
+} // GrowlRegistrationPacket
+
+function addNotification(string szNotification, integer bEnabled)
+{
+	index = index + 1;
+
+	m_aNotification[index].text = szNotification;
+	m_aNotification[index].bool = bEnabled;
+
+} // addNotification
+
+string_function payload()
+{
+	integer i;
+	integer arr_szEncoded[1]; 
+	integer arr_szData[5]; 
+	integer nCount; 
+	integer nDefaults;
+
+	string szName$[128]; 
+	string szEncoded$[128]; 
+	string szData$[512]; 
+	string szDefaults$[128];
+	
+	szEncoded$ = "";
+	szDefaults$ = "";
+	
+	nCount = 0;
+	nDefaults = 0;
+	    
+    for(i = 1 to index)
+    {
+    	szName$ = utf8_encode(m_aNotification[i].text);
+
+	    setArray(arr_szEncoded, 0);
+	    
+		arr_szEncoded[0] = (len(szName$) & 0xFF00) >> 8;
+		arr_szEncoded[1] = len(szName$) & 0x00FF;
+
+   		szEncoded$ = szEncoded$ + chr(arr_szEncoded[0]);
+   		szEncoded$ = szEncoded$ + chr(arr_szEncoded[1]);    
+    	szEncoded$ = szEncoded$ + szName$;
+    
+    	nCount = nCount + 1;
+    	
+    	if(m_aNotification[i].bool)
+    	{
+    		szDefaults$ = chr(nCount - 1);
+    		nDefaults = nDefaults + 1;
+    	}
+    }
+    
+	setArray(arr_szData, 0);
+
+	// ver	
+	arr_szData[0] = GROWL_PROTOCOL_VERSION;
+
+	// type
+	arr_szData[1] = GROWL_TYPE_REGISTRATION;
+
+	// app name length
+	arr_szData[2] = (len(m_szApplication$) & 0xFF00) >> 8;
+	arr_szData[3] = len(m_szApplication$) & 0x00FF;
+
+	// nall
+	arr_szData[4] = nCount;
+
+	// ndef
+	arr_szData[5] = nDefaults;
+
+	// data	
+	for(i = 0 to 5) szData$ = szData$ + chr(arr_szData[i]);
+
+	szData$ = szData$ + m_szApplication$;
+	szData$ = szData$ + szEncoded$;
+	szData$ = szData$ + szDefaults$;
+  
+	return(szData$);
+} // payload
+
+string_function GrowlNotificationPacket(
+	string szApplication$,
+	string szNotification$,
+	string szTitle$,
+	string szDescription$,
+	signed_integer nPriority,
+	integer bSticky)
+{
+	integer i;
+	integer hex; 
+	integer arr_szData[11];
+
+	signed_integer nFlags;
+
+	string szData$[640];
+
+	szApplication$ = utf8_encode(szApplication$);
+	szNotification$ = utf8_encode(szNotification$);
+	szTitle$ = utf8_encode(szTitle$);
+	szDescription$ = utf8_encode(szDescription$);
+			
+	nFlags = (nPriority & 7) * 2;
+
+	if(nPriority < 0) nFlags = nFlags | 8;
+	if(bSticky) nFlags = nFlags | 256;	
+
+	setArray(arr_szData, 0);
+	
+	// ver
+	arr_szData[0] = GROWL_PROTOCOL_VERSION;
+
+	// type
+	arr_szData[1] = GROWL_TYPE_NOTIFICATION;
+
+	// flags
+	arr_szData[2] = (nFlags & 0xFF00) >> 8;
+	arr_szData[3] = nFlags & 0x00FF;
+	
+	// notification length
+	arr_szData[4] = (len(szNotification$) & 0xFF00) >> 8;
+	arr_szData[5] = len(szNotification$) & 0x00FF;
+	
+	// title length
+	arr_szData[6] = (len(szTitle$) & 0xFF00) >> 8;
+	arr_szData[7] = len(szTitle$) & 0x00FF;
+
+	// description length		
+	arr_szData[8] = (len(szDescription$) & 0xFF00) >> 8;
+	arr_szData[9] = len(szDescription$) & 0x00FF;
+
+	// app name length	
+	arr_szData[10] = (len(szApplication$) & 0xFF00) >> 8;
+	arr_szData[11] = len(szApplication$) & 0x00FF;
+	
+	// data
+	for(i = 0 to 11) szData$ = szData$ + chr(arr_szData[i]);
+	
+	szData$ = szData$ + szNotification$;
+	szData$ = szData$ + szTitle$;
+	szData$ = szData$ + szDescription$;
+	szData$ = szData$ + szApplication$;
+	
+	return(szData$);
+} // GrowlNotificationPacket
+
+change szDescription_Text
+{
+	string datagram$[512];
+    
+    datagram$ = "";
+    
+	if(sockOnline)
+	{
+		datagram$ = GrowlNotificationPacket(
+			APPLICATION_NAME,
+			szNotification_Text,
+			szTitle_Text,
+			szDescription_Text,
+			nPriority_Analog,
+			bSticky_Analog
+		);
+        
+        socketSend(sock, datagram$);
+    }
+} // szDescription_Text
+
+function main()
+{
+	signed_integer status;
+	
+	waitForInitializationComplete();
+	
+	GrowlRegistrationPacket(APPLICATION_NAME);
+	addNotification(szNotification_Text, 1);
+	
+	status = socketUDP_enable(sock, ipAddress, GROWL_UDP_PORT);
+	if(status >= 0)
+	{
+		sockOnline = 1;
+		wait(100) socketSend(sock, payload());
+	}	
+} // main
